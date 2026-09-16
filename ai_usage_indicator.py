@@ -223,9 +223,7 @@ CODEX_INIT = json.dumps(
         },
     }
 )
-CODEX_LIMITS = json.dumps(
-    {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}}
-)
+CODEX_LIMITS_REQUEST = {"jsonrpc": "2.0", "method": "account/rateLimits/read", "params": {}}
 
 
 def _pick(source: dict, *names):
@@ -296,8 +294,19 @@ def fetch_codex_live(timeout: int) -> dict:
         # rather than writing both at once.
         send(CODEX_INIT)
         await_id(1)
-        send(CODEX_LIMITS)
-        message = await_id(2)
+        # Immediately after the handshake the server sometimes reports the
+        # account as unauthenticated because it has not finished loading the
+        # stored token. That clears within a moment, so give it one retry.
+        message = None
+        for attempt, request_id in enumerate((2, 3)):
+            send(json.dumps(CODEX_LIMITS_REQUEST | {"id": request_id}))
+            message = await_id(request_id)
+            error = message.get("error")
+            if not error or attempt:
+                break
+            if "authentication required" not in str(error.get("message", "")).lower():
+                break
+            time.sleep(0.5)
     finally:
         proc.kill()
         try:
@@ -486,7 +495,7 @@ def normalise_codex(payload: dict, stale_minutes: int) -> dict:
         entry = limits.get(key)
         if not entry:
             continue
-        window_minutes = _pick(entry, "window_minutes", "windowMinutes") or 0
+        window_minutes = _pick(entry, "window_minutes", "windowMinutes", "windowDurationMins") or 0
         if window_minutes >= 1440:
             name = f"{round(window_minutes / 1440)}-Tage-Fenster"
         elif window_minutes:
@@ -505,7 +514,29 @@ def normalise_codex(payload: dict, stale_minutes: int) -> dict:
             }
         )
 
-    return {"windows": windows, "stale": stale, "age_minutes": age_minutes, "live": live}
+    # Codex's answer to Claude's extra credits: a spend allowance with its own
+    # reset. Only the app-server reports it; the rollout logs do not.
+    quota = None
+    individual = limits.get("individualLimit") or {}
+    if individual.get("limit") is not None:
+        try:
+            quota = {
+                "used": float(individual.get("used") or 0),
+                "limit": float(individual["limit"]),
+                "percent": 100.0 - float(individual.get("remainingPercent") or 0),
+                "resets_at": _codex_reset(individual.get("resetsAt")),
+            }
+        except (TypeError, ValueError):
+            quota = None
+
+    return {
+        "windows": windows,
+        "stale": stale,
+        "age_minutes": age_minutes,
+        "live": live,
+        "quota": quota,
+        "spend_limit_reached": bool(limits.get("spendControlReached")),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -731,6 +762,17 @@ class UsageIndicator:
                         format_reset(window["resets_at"]),
                         dim=stale,
                     )
+                quota = codex.get("quota")
+                if quota:
+                    self._gauge_row(
+                        "Individuelles Limit",
+                        quota["percent"],
+                        f"{quota['used']:.0f} / {quota['limit']:.0f}"
+                        f"  \u00b7  {format_reset(quota['resets_at'])}",
+                        dim=stale,
+                    )
+                if codex.get("spend_limit_reached"):
+                    self._note("\u26a0  Ausgabelimit erreicht", colour=RED_HEX)
                 if hint:
                     self._note(hint, colour=ORANGE_HEX)
             else:

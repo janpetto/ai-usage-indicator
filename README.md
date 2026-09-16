@@ -16,8 +16,9 @@ credential:
   the stream-JSON protocol. `claude` talks to Anthropic with its own credential and
   hands back structured data. Takes ~1.5s and costs **no tokens**.
 * **OpenAI Codex** — spawns `codex app-server` and calls `account/rateLimits/read`
-  over JSON-RPC. Same deal: the CLI holds the credential, not this process.
-  Requires `codex login` once; until then the indicator falls back to the
+  over JSON-RPC. Same deal: the CLI holds the credential, not this process. This
+  also reports `individualLimit`, Codex's own spend allowance. Requires
+  `codex login` once; until then the indicator falls back to the
   `rate_limits` snapshots Codex writes into `~/.codex/sessions/**/*.jsonl`, which
   are only as fresh as your last Codex session. Data older than
   `codex_stale_minutes` is greyed out and never raises an alert.
@@ -60,7 +61,7 @@ orange < 95 %, red above), plus a label:
 ```
 
 The menu breaks out every window with its percentage and reset countdown, plus
-extra-credit spend.
+Claude's extra-credit spend and Codex's individual spend limit.
 
 ## Notifications
 
