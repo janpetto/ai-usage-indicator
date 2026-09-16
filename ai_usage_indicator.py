@@ -43,6 +43,9 @@ DEFAULT_CONFIG = {
     # Percentages at which to raise a desktop notification, per limit window.
     # Re-arms once the window resets.
     "thresholds": [80, 95, 100],
+    # Percentage a window must reach before it appears in the panel label.
+    # null means "the lowest entry in thresholds".
+    "label_min_percent": None,
     "show_codex": True,
     # Codex figures older than this are shown greyed out and ignored for alerts.
     "codex_stale_minutes": 60,
@@ -397,16 +400,20 @@ def normalise_claude(rate_limits: dict) -> dict:
         "weekly_all": "Woche (alle Modelle)",
         "weekly_scoped": "Woche",
     }
+    tags = {"session": "5h", "weekly_all": "7d", "weekly_scoped": "7d"}
     for limit in rate_limits.get("limits") or []:
         kind = limit.get("kind")
         name = labels.get(kind, kind or "Limit")
         scope = (limit.get("scope") or {}).get("model") or {}
+        tag = tags.get(kind, "?")
         if kind == "weekly_scoped" and scope.get("display_name"):
             name = f"Woche ({scope['display_name']})"
+            tag = f"7d {scope['display_name']}"
         windows.append(
             {
                 "key": f"claude:{kind}:{scope.get('display_name') or ''}",
                 "name": name,
+                "tag": tag,
                 "percent": float(limit.get("percent") or 0),
                 "resets_at": parse_iso(limit.get("resets_at")),
                 "is_session": kind == "session",
@@ -427,6 +434,7 @@ def normalise_claude(rate_limits: dict) -> dict:
                 {
                     "key": f"claude:{key}:",
                     "name": name,
+                    "tag": "5h" if is_session else "7d",
                     "percent": float(entry.get("utilization") or 0),
                     "resets_at": parse_iso(entry.get("resets_at")),
                     "is_session": is_session,
@@ -483,6 +491,7 @@ def normalise_codex(payload: dict, stale_minutes: int) -> dict:
             {
                 "key": f"codex:{key}",
                 "name": name,
+                "tag": "cx 5h" if key == "primary" else "cx 7d",
                 "percent": float(_pick(entry, "used_percent", "usedPercent") or 0),
                 "resets_at": _codex_reset(_pick(entry, "resets_at", "resetsAt")),
                 "is_session": key == "primary",
@@ -651,6 +660,14 @@ class UsageIndicator:
         self.rebuild_menu()
         return False
 
+    def label_floor(self) -> float:
+        """Percentage a window must reach to be worth panel space."""
+        configured = self.config.get("label_min_percent")
+        if configured is not None:
+            return float(configured)
+        thresholds = self.config.get("thresholds") or [80]
+        return float(min(thresholds))
+
     def _all_windows(self) -> list[dict]:
         windows = []
         for source in ("claude", "codex"):
@@ -675,23 +692,14 @@ class UsageIndicator:
         name = render_icon(worst, severity_color(worst), self.generation)
         self.indicator.set_icon_full(name, f"AI Usage: {worst:.0f}%")
 
-        parts = []
-        if claude:
-            session = next((w for w in claude["windows"] if w["is_session"]), None)
-            weekly = next(
-                (w for w in claude["windows"] if not w["is_session"] and "alle" in w["name"]), None
-            )
-            if session:
-                parts.append(f"{session['percent']:.0f}%")
-            if weekly:
-                parts.append(f"{weekly['percent']:.0f}%")
-        if codex and not codex["stale"]:
-            primary = next((w for w in codex["windows"] if w["is_session"]), None)
-            if primary:
-                parts.append(f"cx {primary['percent']:.0f}%")
-
-        label = " · ".join(parts) if parts else "n/a"
-        self.indicator.set_label(label, "100% · 100% · cx 100%")
+        # Only windows that have actually reached the first alert level earn a
+        # spot in the panel; the rest of the time the ring alone is enough. A
+        # provider left idle all day therefore costs no panel width at all.
+        floor = self.label_floor()
+        hot = [w for w in self._all_windows() if w["alerting"] and w["percent"] >= floor]
+        hot.sort(key=lambda w: w["percent"], reverse=True)
+        label = " \u00b7 ".join(f"{w['tag']} {w['percent']:.0f}%" for w in hot)
+        self.indicator.set_label(label, "cx 5h 100% \u00b7 7d Sonnet 100%")
 
     def rebuild_menu(self) -> None:
         for child in self.menu.get_children():

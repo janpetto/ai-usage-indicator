@@ -51,14 +51,22 @@ Tick **"Beim Anmelden starten"** in the menu to install
 ## What the panel shows
 
 A progress ring coloured by the worst active window (green < 60 %, yellow < 85 %,
-orange < 95 %, red above), plus a label:
+orange < 95 %, red above). Most of the time that ring is all you get.
+
+A window only earns a spot in the label once it reaches `label_min_percent`
+— by default the lowest entry in `thresholds`, so the label and the first
+notification appear together:
 
 ```
-30% · 24% · cx 8%
- │     │      └─ Codex 5-hour window (hidden when stale)
- │     └──────── Claude weekly, all models
- └────────────── Claude 5-hour window
+5h 97% · cx 5h 88% · 7d 81%
+ │        │           └─ Claude weekly, all models
+ │        └───────────── Codex 5-hour window ("cx" prefix)
+ └────────────────────── Claude 5-hour window
 ```
+
+Hottest window first. A provider you have not touched all day stays below the
+floor and costs no panel width at all, and stale Codex figures never appear no
+matter how high they are.
 
 The menu breaks out every window with its percentage and reset countdown, plus
 Claude's extra-credit spend and Codex's individual spend limit.
@@ -81,6 +89,7 @@ Claude's extra-credit spend and Codex's individual spend limit.
 | --- | --- | --- |
 | `poll_interval_seconds` | `180` | Refresh interval |
 | `thresholds` | `[80, 95, 100]` | Percentages that raise a notification |
+| `label_min_percent` | `null` | Percentage a window needs to show in the panel label; `null` uses the lowest threshold |
 | `show_codex` | `true` | Show the Codex section at all |
 | `codex_stale_minutes` | `60` | Older Codex data is greyed out and never alerts |
 | `extra_credit_notify_cooldown_seconds` | `900` | Minimum gap between extra-credit warnings |
