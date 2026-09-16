@@ -773,9 +773,13 @@ class UsageIndicator:
     # -- menu building ----------------------------------------------------
 
     def _heading(self, text: str) -> None:
-        """Section title. Deliberately insensitive: grey reads as a header."""
+        """Section title.
+
+        Sensitive like every other row: insensitive would grey it out, and the
+        exported menu has no styling left to mark a heading with. The hierarchy
+        comes from the data rows being indented under it instead.
+        """
         item = Gtk.MenuItem(label=text)
-        item.set_sensitive(False)
         self.menu.append(item)
 
     def _note(self, text: str) -> None:
