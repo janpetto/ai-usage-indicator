@@ -27,7 +27,7 @@ gi.require_version("Notify", "0.7")
 
 import cairo  # noqa: E402
 from gi.repository import AyatanaAppIndicator3 as AppIndicator  # noqa: E402
-from gi.repository import Gdk, GLib, Gtk, Notify  # noqa: E402
+from gi.repository import GLib, Gtk, Notify  # noqa: E402
 
 APP_ID = "ai-usage-indicator"
 CONFIG_DIR = Path(GLib.get_user_config_dir()) / APP_ID
@@ -58,25 +58,8 @@ ORANGE = (0.91, 0.35, 0.05)
 RED = (0.85, 0.21, 0.20)
 GREY = (0.55, 0.55, 0.55)
 
-# Menu colours. Chosen to stay legible on both the light and the dark theme.
-GREEN_HEX = "#1f8b3b"
-YELLOW_HEX = "#b8860b"
-ORANGE_HEX = "#e8590c"
-RED_HEX = "#d12f2c"
-GREY_HEX = "#8a8a8a"
-
-ROW_INDENT = 6
+# Blocks in the text bar drawn in each menu row.
 BAR_SEGMENTS = 12
-
-# GtkMenuItem prelights on hover even when it carries no action, which reads as
-# "clickable". Data rows opt out via this class.
-MENU_CSS = b"""
-menuitem.aui-row, menuitem.aui-row:hover {
-    background-image: none;
-    background-color: transparent;
-}
-"""
-
 
 def severity_color(percent: float):
     if percent >= 95:
@@ -88,35 +71,29 @@ def severity_color(percent: float):
     return GREEN
 
 
-def severity_hex(percent: float) -> str:
-    if percent >= 95:
-        return RED_HEX
-    if percent >= 85:
-        return ORANGE_HEX
-    if percent >= 60:
-        return YELLOW_HEX
-    return GREEN_HEX
+def render_bar(percent: float) -> str:
+    """A block bar as plain text.
 
-
-def render_bar(percent: float, colour: str) -> str:
-    """A filled/empty block bar as Pango markup."""
+    AppIndicator exports the menu over DBus via libdbusmenu, which carries only
+    an item's plain label: composite widgets and Pango markup are dropped. So
+    every visual cue has to survive as text.
+    """
     fraction = max(0.0, min(percent, 100.0)) / 100.0
     filled = int(round(fraction * BAR_SEGMENTS))
-    # Anything above zero should show at least one block.
     if percent > 0:
         filled = max(filled, 1)
-    return (
-        f'<span font_family="monospace" foreground="{colour}">{"\u2588" * filled}</span>'
-        f'<span font_family="monospace" alpha="25%">{"\u2588" * (BAR_SEGMENTS - filled)}</span>'
-    )
+    return "\u2588" * filled + "\u2591" * (BAR_SEGMENTS - filled)
 
 
-def install_css() -> None:
-    provider = Gtk.CssProvider()
-    provider.load_from_data(MENU_CSS)
-    Gtk.StyleContext.add_provider_for_screen(
-        Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-    )
+def severity_marker(percent: float) -> str:
+    """Colour, carried by an emoji because markup cannot cross the DBus menu."""
+    if percent >= 95:
+        return "\U0001f534"
+    if percent >= 85:
+        return "\U0001f7e0"
+    if percent >= 60:
+        return "\U0001f7e1"
+    return "\U0001f7e2"
 
 
 # --------------------------------------------------------------------------
@@ -600,7 +577,6 @@ class UsageIndicator:
         self._wake = threading.Event()
 
         ICON_DIR.mkdir(parents=True, exist_ok=True)
-        install_css()
         Notify.init("AI Usage")
 
         self.indicator = AppIndicator.Indicator.new(
@@ -727,7 +703,7 @@ class UsageIndicator:
 
         self._heading("Claude Code")
         if error:
-            self._note(f"\u26a0  {error}", colour=RED_HEX)
+            self._note(f"\u26a0  {error}")
         elif claude:
             for window in claude["windows"]:
                 self._gauge_row(window["name"], window["percent"], format_reset(window["resets_at"]))
@@ -741,7 +717,7 @@ class UsageIndicator:
                     f"{credits['used']:.2f} / {credits['limit']:.2f} {symbol}",
                 )
                 if credits["spend_limit_reached"]:
-                    self._note("\u26a0  Ausgabelimit erreicht", colour=RED_HEX)
+                    self._note("\u26a0  Ausgabelimit erreicht")
         else:
             self._note("l\u00e4dt \u2026")
 
@@ -772,12 +748,12 @@ class UsageIndicator:
                         dim=stale,
                     )
                 if codex.get("spend_limit_reached"):
-                    self._note("\u26a0  Ausgabelimit erreicht", colour=RED_HEX)
+                    self._note("\u26a0  Ausgabelimit erreicht")
                 if hint:
-                    self._note(hint, colour=ORANGE_HEX)
+                    self._note(hint)
             else:
                 self._heading("OpenAI Codex")
-                self._note(hint or "keine Daten gefunden", colour=ORANGE_HEX if hint else None)
+                self._note(hint or "keine Daten gefunden")
 
         self.menu.append(Gtk.SeparatorMenuItem())
         updated = self.snapshot.get("updated_at")
@@ -796,74 +772,29 @@ class UsageIndicator:
 
     # -- menu building ----------------------------------------------------
 
-    def _inert(self, item: Gtk.MenuItem) -> Gtk.MenuItem:
-        """Append a row that shows data rather than offering an action.
-
-        The item stays *sensitive* on purpose: an insensitive GtkMenuItem is
-        drawn in the theme's dimmed colour, which is what made every figure look
-        greyed out. Swallowing the button events keeps it from acting clickable.
-        """
-        item.get_style_context().add_class("aui-row")
-        item.connect("button-press-event", lambda *_a: True)
-        item.connect("button-release-event", lambda *_a: True)
-        self.menu.append(item)
-        return item
-
     def _heading(self, text: str) -> None:
-        label = Gtk.Label(xalign=0.0)
-        label.set_markup(f'<b>{GLib.markup_escape_text(text)}</b>')
-        label.set_margin_top(4)
-        item = Gtk.MenuItem()
-        item.add(label)
-        self._inert(item)
+        """Section title. Deliberately insensitive: grey reads as a header."""
+        item = Gtk.MenuItem(label=text)
+        item.set_sensitive(False)
+        self.menu.append(item)
 
-    def _note(self, text: str, colour: str | None = None) -> None:
-        label = Gtk.Label(xalign=0.0)
-        escaped = GLib.markup_escape_text(text)
-        if colour:
-            label.set_markup(f'<span foreground="{colour}">{escaped}</span>')
-        else:
-            label.set_markup(f'<span alpha="70%">{escaped}</span>')
-        label.set_margin_start(ROW_INDENT)
-        item = Gtk.MenuItem()
-        item.add(label)
-        self._inert(item)
+    def _note(self, text: str) -> None:
+        item = Gtk.MenuItem(label=f"    {text}")
+        self.menu.append(item)
 
     def _gauge_row(self, name: str, percent: float, trailing: str, dim: bool = False) -> None:
-        """One limit window: dot, name, percentage, bar, reset time."""
-        colour = GREY_HEX if dim else severity_hex(percent)
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        box.set_margin_start(ROW_INDENT)
+        """One limit window.
 
-        dot = Gtk.Label()
-        dot.set_markup(f'<span foreground="{colour}" size="large">\u25cf</span>')
-        box.pack_start(dot, False, False, 0)
-
-        title = Gtk.Label(xalign=0.0)
-        title.set_width_chars(21)
-        title.set_markup(
-            f'<span alpha="{"55%" if dim else "100%"}">{GLib.markup_escape_text(name)}</span>'
+        Everything before the name is fixed width, so the rows line up even in
+        the menu's proportional font.
+        """
+        marker = "\u26aa" if dim else severity_marker(percent)
+        item = Gtk.MenuItem(
+            label=f"  {marker}  {percent:3.0f} %  {render_bar(percent)}   {name} \u00b7 {trailing}"
         )
-        box.pack_start(title, False, False, 0)
-
-        value = Gtk.Label(xalign=1.0)
-        value.set_width_chars(5)
-        value.set_markup(f'<b><span foreground="{colour}">{percent:.0f}\u2009%</span></b>')
-        box.pack_start(value, False, False, 0)
-
-        bar = Gtk.Label()
-        bar.set_markup(render_bar(percent, colour))
-        box.pack_start(bar, False, False, 0)
-
-        tail = Gtk.Label(xalign=0.0)
-        tail.set_markup(
-            f'<span alpha="{"45%" if dim else "70%"}">{GLib.markup_escape_text(trailing)}</span>'
-        )
-        box.pack_start(tail, False, False, 0)
-
-        item = Gtk.MenuItem()
-        item.add(box)
-        self._inert(item)
+        # Sensitive on purpose: an insensitive item is drawn in the theme's
+        # disabled colour, which greyed out every figure.
+        self.menu.append(item)
 
     def _action(self, text: str, handler) -> None:
         item = Gtk.MenuItem(label=text)
