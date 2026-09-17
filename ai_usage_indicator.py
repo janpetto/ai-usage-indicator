@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import threading
@@ -54,6 +55,47 @@ DEFAULT_CONFIG = {
     "claude_timeout_seconds": 60,
     "codex_timeout_seconds": 30,
 }
+
+# GNOME starts autostart programs with a bare PATH - no ~/.local/bin, no
+# version-manager shims - so a per-user CLI install is invisible to a plain
+# subprocess call. Put the usual install directories back before looking, and
+# keep them in os.environ so the CLIs find their own helpers (node, say) too.
+def _cli_search_dirs() -> list[Path]:
+    home = Path.home()
+    dirs = [
+        home / ".local" / "bin",
+        home / "bin",
+        home / ".local" / "share" / "mise" / "shims",
+        home / ".asdf" / "shims",
+        home / ".npm-global" / "bin",
+        home / ".bun" / "bin",
+        home / ".volta" / "bin",
+        home / ".cargo" / "bin",
+        Path("/usr/local/bin"),
+    ]
+    nvm = home / ".nvm" / "versions" / "node"
+    if nvm.is_dir():
+        versions = sorted(nvm.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        dirs.extend(version / "bin" for version in versions)
+    return dirs
+
+
+def extend_path() -> None:
+    parts = os.environ.get("PATH", os.defpath).split(os.pathsep)
+    for directory in _cli_search_dirs():
+        entry = str(directory)
+        if entry not in parts and directory.is_dir():
+            parts.append(entry)
+    os.environ["PATH"] = os.pathsep.join(parts)
+
+
+def resolve_cli(name: str) -> str:
+    """Return the absolute path of a CLI, or raise if it is not installed."""
+    found = shutil.which(name)
+    if found is None:
+        raise FileNotFoundError(f"{name} nicht gefunden")
+    return found
+
 
 GREEN = (0.18, 0.63, 0.26)
 YELLOW = (0.82, 0.60, 0.13)
@@ -147,7 +189,7 @@ def fetch_claude(timeout: int) -> dict:
     """
     proc = subprocess.run(
         [
-            "claude",
+            resolve_cli("claude"),
             "--print",
             "--verbose",
             "--input-format",
@@ -237,7 +279,7 @@ def fetch_codex_live(timeout: int) -> dict:
     by other clients on the same account (Pi, for instance) is included.
     """
     proc = subprocess.Popen(
-        ["codex", "app-server"],
+        [resolve_cli("codex"), "app-server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -938,6 +980,7 @@ class UsageIndicator:
 
 
 def main() -> int:
+    extend_path()
     indicator = UsageIndicator(load_config())
     try:
         Gtk.main()
