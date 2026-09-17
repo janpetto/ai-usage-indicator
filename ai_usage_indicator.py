@@ -37,6 +37,11 @@ STATE_FILE = CONFIG_DIR / "state.json"
 ICON_DIR = Path(GLib.get_user_cache_dir()) / APP_ID / "icons"
 AUTOSTART_FILE = Path(GLib.get_user_config_dir()) / "autostart" / f"{APP_ID}.desktop"
 
+# Two reset timestamps this close together describe the same window; anything
+# further apart is the next one. Real windows are hours apart, the jitter in a
+# recomputed timestamp is under a second.
+WINDOW_DRIFT_SECONDS = 120
+
 DEFAULT_CONFIG = {
     # How often to refresh, in seconds. Each Claude refresh spawns the CLI for
     # about 1.5s and costs no tokens.
@@ -160,9 +165,31 @@ def load_config() -> dict:
 
 def load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text())
+        state = json.loads(STATE_FILE.read_text())
     except Exception:  # noqa: BLE001
         return {}
+    return _migrate_fired(state)
+
+
+def _migrate_fired(state: dict) -> dict:
+    """Lift the old `window@reset -> [levels]` entries into the current shape.
+
+    Without this, the first run after the upgrade would treat every window as
+    unseen and repeat the alerts it has already sent.
+    """
+    fired = state.get("fired")
+    if not isinstance(fired, dict):
+        return state
+    for key, value in list(fired.items()):
+        if "@" not in key or not isinstance(value, list):
+            continue
+        base, _, stamp = key.rpartition("@")
+        del fired[key]
+        fired[base] = {
+            "resets_at": None if stamp == "none" else stamp,
+            "levels": sorted(value),
+        }
+    return state
 
 
 def save_state(state: dict) -> None:
@@ -865,6 +892,19 @@ class UsageIndicator:
         except Exception as exc:  # noqa: BLE001
             print(f"[{APP_ID}] notification failed: {exc}", file=sys.stderr)
 
+    @staticmethod
+    def _is_next_window(recorded: str | None, current: datetime | None) -> bool:
+        """Did the window roll over, or is this the same one seen again?
+
+        The Claude CLI recomputes `resets_at` for every call, so the value
+        wobbles by a fraction of a second within one and the same window. Only a
+        real jump means the window has rolled over and the alerts must re-arm.
+        """
+        previous = parse_iso(recorded) if recorded else None
+        if previous is None or current is None:
+            return previous is not current
+        return abs((current - previous).total_seconds()) > WINDOW_DRIFT_SECONDS
+
     def _check_alerts(self, snapshot: dict) -> None:
         fired = self.state.setdefault("fired", {})
         dirty = False
@@ -872,10 +912,17 @@ class UsageIndicator:
         for window in self._windows_of(snapshot):
             if not window["alerting"]:
                 continue
-            # Keying on the reset timestamp re-arms the alert for the next window.
-            stamp = window["resets_at"].isoformat() if window["resets_at"] else "none"
-            key = f"{window['key']}@{stamp}"
-            already = set(fired.get(key, []))
+            key = window["key"]
+            record = fired.get(key)
+            if not isinstance(record, dict) or self._is_next_window(
+                record.get("resets_at"), window["resets_at"]
+            ):
+                # A fresh window (or a state file from an older layout): re-arm.
+                stamp = window["resets_at"]
+                record = {"resets_at": stamp.isoformat() if stamp else None, "levels": []}
+                fired[key] = record
+                dirty = True
+            already = set(record["levels"])
             for threshold in sorted(self.config["thresholds"]):
                 if window["percent"] >= threshold and threshold not in already:
                     already.add(threshold)
@@ -894,15 +941,15 @@ class UsageIndicator:
                             f"Reset {format_reset(window['resets_at'])}.",
                             urgent=threshold >= 95,
                         )
-            if already:
-                fired[key] = sorted(already)
+            record["levels"] = sorted(already)
 
-        # Prune keys for windows that have already reset.
-        live = {
-            f"{w['key']}@{w['resets_at'].isoformat() if w['resets_at'] else 'none'}"
-            for w in self._windows_of(snapshot)
-        }
-        for stale_key in [k for k in fired if k not in live]:
+        # Drop windows a source no longer reports at all. Sources that failed to
+        # answer this round are left alone, so a hiccup does not re-arm alerts.
+        live = {w["key"] for w in self._windows_of(snapshot)}
+        answered = tuple(f"{s}:" for s in ("claude", "codex") if snapshot.get(s))
+        for stale_key in [
+            k for k in fired if k.startswith(answered) and k not in live
+        ]:
             del fired[stale_key]
             dirty = True
 
